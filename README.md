@@ -23,11 +23,11 @@ server can only read the topology file for itself. The entries of a topology fil
 • <server-ID> <server-IP> <server-port> 
 • <server-ID1> <server-ID2> <cost> 
 ```
-
+```
 num-servers: total number of servers in the network. 
 num-neighbors: the number of directly linked neighbors of the server. 
 server-ID, server-ID1, server-ID2: a unique identifier for a server, which is assigned by you.   
 cost: cost of a given link between a pair of servers. Assume that cost is an integer value.
-
+```
 
 
