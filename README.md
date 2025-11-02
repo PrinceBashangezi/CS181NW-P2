@@ -31,3 +31,10 @@ cost: cost of a given link between a pair of servers. Assume that cost is an int
 ```
 
 
+
+# Week 1 Delegations (Nov 2 - Nov 9)
+```
+Prince: server (startup etc)
+Bryson: crash, packets
+Sultan: update
+```
