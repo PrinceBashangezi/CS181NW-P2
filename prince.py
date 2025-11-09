@@ -21,7 +21,6 @@ class TopologyParser:
         try:
             with open(filename, 'r') as f:
                 lines = [line.strip() for line in f.readlines() if line.strip()]
-            
             if len(lines) < 3:
                 raise ValueError("Topology file must have at least 3 lines")
             
@@ -43,7 +42,7 @@ class TopologyParser:
             # Parse all servers in network
             servers = {}
             server_idx = 3
-            for i in range(num_servers):
+            for i in range(num_servers-1):
                 if server_idx >= len(lines):
                     raise ValueError(f"Not enough server entries in topology file (expected {num_servers})")
                 
@@ -185,14 +184,15 @@ class RoutingTable:
 class Server:
     """Distance Vector Routing Server"""
     
-    def __init__(self, topology_file):
+    def __init__(self, topology_file, routing_update_interval):
         """
         Initialize server from topology file
         topology_file: path to topology file
+        routing_update_interval: time interval between routing updates in seconds
         """
         # Parse topology file
         topology = TopologyParser.parse_topology_file(topology_file)
-        
+
         self.server_id = topology['server_id']
         self.server_ip = topology['server_ip']
         self.server_port = topology['server_port']
@@ -200,6 +200,7 @@ class Server:
         self.neighbors = topology['neighbors']
         self.num_servers = topology['num_servers']
         self.num_neighbors = topology['num_neighbors']
+        self.routing_update_interval = routing_update_interval
         
         # Initialize routing table
         self.routing_table = RoutingTable(self.server_id, self.servers, self.neighbors)
@@ -211,6 +212,7 @@ class Server:
         print(f"  IP: {self.server_ip}")
         print(f"  Port: {self.server_port}")
         print(f"  Neighbors: {list(self.neighbors.keys())}")
+        print(f"  Routing Update Interval: {self.routing_update_interval} seconds")
     
     def start(self):
         """Start UDP server socket"""
@@ -256,32 +258,102 @@ class Server:
         }
 
 
-def main():
-    """Main function for testing"""
-    if len(sys.argv) != 2:
-        print("Usage: python3 prince.py <topology-file>")
-        sys.exit(1)
+def parse_server_command(command_line):
+    """Parse server command: server -t <topology-file> -i <interval>"""
+    parts = command_line.strip().split()
     
-    topology_file = sys.argv[1]
+    if len(parts) < 5 or parts[0] != 'server':
+        return None, None
+    
+    topology_file = None
+    interval = None
+    
+    i = 1
+    while i < len(parts):
+        if parts[i] == '-t' and i + 1 < len(parts):
+            topology_file = parts[i + 1]
+            i += 2
+        elif parts[i] == '-i' and i + 1 < len(parts):
+            try:
+                interval = int(parts[i + 1])
+                i += 2
+            except ValueError:
+                return None, None
+        else:
+            i += 1
+    
+    if topology_file is None or interval is None:
+        return None, None
+    
+    return topology_file, interval
+
+
+def main():
+    """Main function - start program and listen for server command"""
+    print("Distance Vector Routing Server")
+    print("Type 'server -t <topology-file> -i <interval>' to start the server")
+    print("Type 'quit' or 'exit' to exit\n")
+    
+    server_instance = None
     
     try:
-        # Create and start server
-        server = Server(topology_file)
-        if server.start():
-            # Print initial routing table
-            server.get_routing_table().print_table()
-            
-            # Keep server running (for testing)
-            print("\nServer running. Press Ctrl+C to stop.")
+        while True:
             try:
-                while True:
-                    pass
+                command = input("> ").strip()
+                
+                if not command:
+                    continue
+                
+                if command.lower() in ['quit', 'exit']:
+                    if server_instance:
+                        server_instance.stop()
+                    print("Exiting...")
+                    break
+                
+                if command.startswith('server'):
+                    # Parse server command
+                    topology_file, interval = parse_server_command(command)
+                    if topology_file is None or interval is None:
+                        print("Error: Invalid server command format.")
+                        print("Usage: server -t <topology-file> -i <routing-update-interval>")
+                        continue
+                    
+                    # Stop existing server if running
+                    if server_instance:
+                        server_instance.stop()
+                    
+                    # Create and start new server
+                    try:
+                        server_instance = Server(topology_file, interval)
+                        if server_instance.start():
+                            # Print initial routing table
+                            server_instance.get_routing_table().print_table()
+                            print("\nServer started successfully.")
+                        else:
+                            print("Error: Failed to start server.")
+                            server_instance = None
+                    except Exception as e:
+                        print(f"Error starting server: {e}")
+                        server_instance = None
+                else:
+                    print(f"Unknown command: {command}")
+                    print("Type 'server -t <topology-file> -i <interval>' to start the server")
+                    print("Type 'quit' or 'exit' to exit")
+            
+            except EOFError:
+                if server_instance:
+                    server_instance.stop()
+                break
             except KeyboardInterrupt:
-                server.stop()
-        else:
-            sys.exit(1)
+                if server_instance:
+                    server_instance.stop()
+                print("\nExiting...")
+                break
+    
     except Exception as e:
         print(f"Error: {e}")
+        if server_instance:
+            server_instance.stop()
         sys.exit(1)
 
 
