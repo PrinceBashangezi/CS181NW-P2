@@ -38,3 +38,13 @@ Prince: server (startup etc)
 Bryson: crash, packets
 Sultan: update
 ```
+
+
+# Week 2 Delegations (Nov 9 - Nov 16)
+```
+Prince: display, disable
+Bryson: put everything together 
+Sultan: step
+
+Please have stuff done by Saturday (11/16) evening, so Bryson can compile everything in time for Sunday (11/16) afternoon!)
+```
