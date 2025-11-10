@@ -179,6 +179,35 @@ class RoutingTable:
             next_hop_str = str(entry['next_hop']) if entry['next_hop'] else "-"
             print(f"{dest_id:<15} {cost_str:<15} {next_hop_str:<15}")
         print("-" * 60)
+    
+    def display_table(self):
+        """Display routing table in format: <destination-server-ID> <next-hop-server-ID> <cost-of-path>
+        Sorted by destination ID from small to big"""
+        # Sort destination IDs (convert to int if possible for numeric sorting, otherwise string sort)
+        def sort_key(dest_id):
+            try:
+                return (0, int(dest_id))  # Numeric IDs
+            except ValueError:
+                return (1, dest_id)  # String IDs
+        
+        sorted_destinations = sorted(self.table.keys(), key=sort_key)
+        
+        for dest_id in sorted_destinations:
+            entry = self.table[dest_id]
+            cost = entry['cost']
+            next_hop = entry['next_hop']
+            
+            # Format cost: use "inf" for infinity, otherwise the numeric value
+            if cost == float('inf'):
+                cost_str = "inf"
+            else:
+                cost_str = str(int(cost)) if cost == int(cost) else str(cost)
+            
+            # Format next_hop: use "-" if None, otherwise the ID
+            next_hop_str = "-" if next_hop is None else str(next_hop)
+            
+            # Print in format: <destination-server-ID> <next-hop-server-ID> <cost-of-path>
+            print(f"{dest_id} {next_hop_str} {cost_str}")
 
 
 class Server:
@@ -292,6 +321,7 @@ def main():
     """Main function - start program and listen for server command"""
     print("Distance Vector Routing Server")
     print("Type 'server -t <topology-file> -i <interval>' to start the server")
+    print("Type 'display' to show the routing table")
     print("Type 'quit' or 'exit' to exit\n")
     
     server_instance = None
@@ -335,9 +365,16 @@ def main():
                     except Exception as e:
                         print(f"Error starting server: {e}")
                         server_instance = None
+                elif command.lower() == 'display':
+                    # Display routing table
+                    if server_instance is None:
+                        print("Error: Server not started. Please start the server first.")
+                    else:
+                        server_instance.get_routing_table().display_tabsle()
                 else:
                     print(f"Unknown command: {command}")
                     print("Type 'server -t <topology-file> -i <interval>' to start the server")
+                    print("Type 'display' to show the routing table")
                     print("Type 'quit' or 'exit' to exit")
             
             except EOFError:
