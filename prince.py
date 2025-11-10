@@ -285,6 +285,32 @@ class Server:
             'ip': self.server_ip,
             'port': self.server_port
         }
+    
+    def disable_neighbor(self, neighbor_id):
+        """
+        Disable the link to a given neighbor server by setting cost to infinity
+        Args:
+            neighbor_id: ID of the neighbor server to disable
+        Returns:
+            True if neighbor was disabled, False if neighbor not found or already disabled
+        """
+        # Check if the given server is a neighbor
+        if neighbor_id not in self.neighbors:
+            return False
+        
+        # Check if neighbor is already disabled
+        if self.neighbors[neighbor_id]['cost'] == float('inf'):
+            return False
+        
+        # Set the link cost to infinity
+        self.neighbors[neighbor_id]['cost'] = float('inf')
+        
+        # Update routing table entry for this neighbor
+        # If this neighbor was the direct path, set cost to infinity
+        # and next_hop to None (or keep it as the neighbor but with inf cost)
+        self.routing_table.update_entry(neighbor_id, float('inf'), neighbor_id)
+        
+        return True
 
 
 def parse_server_command(command_line):
@@ -317,11 +343,22 @@ def parse_server_command(command_line):
     return topology_file, interval
 
 
+def parse_disable_command(command_line):
+    """Parse disable command: disable <server-ID>"""
+    parts = command_line.strip().split()
+    
+    if len(parts) != 2 or parts[0].lower() != 'disable':
+        return None
+    
+    return parts[1]  # Return the server-ID
+
+
 def main():
     """Main function - start program and listen for server command"""
     print("Distance Vector Routing Server")
     print("Type 'server -t <topology-file> -i <interval>' to start the server")
     print("Type 'display' to show the routing table")
+    print("Type 'disable <server-ID>' to disable a neighbor link")
     print("Type 'quit' or 'exit' to exit\n")
     
     server_instance = None
@@ -370,11 +407,32 @@ def main():
                     if server_instance is None:
                         print("Error: Server not started. Please start the server first.")
                     else:
-                        server_instance.get_routing_table().display_tabsle()
+                        server_instance.get_routing_table().display_table()
+                elif command.lower().startswith('disable'):
+                    # Disable neighbor link
+                    if server_instance is None:
+                        print("Error: Server not started. Please start the server first.")
+                    else:
+                        server_id = parse_disable_command(command)
+                        if server_id is None:
+                            print("Error: Invalid disable command format.")
+                            print("Usage: disable <server-ID>")
+                        else:
+                            # Check if server is a neighbor before attempting to disable
+                            neighbors = server_instance.get_neighbors()
+                            if server_id not in neighbors:
+                                print(f"Error: Server {server_id} is not a neighbor.")
+                            elif neighbors[server_id]['cost'] == float('inf'):
+                                print(f"Error: Link to server {server_id} is already disabled.")
+                            elif server_instance.disable_neighbor(server_id):
+                                print(f"Link to server {server_id} disabled (cost set to infinity).")
+                            else:
+                                print(f"Error: Failed to disable link to server {server_id}.")
                 else:
                     print(f"Unknown command: {command}")
                     print("Type 'server -t <topology-file> -i <interval>' to start the server")
                     print("Type 'display' to show the routing table")
+                    print("Type 'disable <server-ID>' to disable a neighbor link")
                     print("Type 'quit' or 'exit' to exit")
             
             except EOFError:
