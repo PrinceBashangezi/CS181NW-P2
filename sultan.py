@@ -17,6 +17,9 @@ def _ensure_state(server: Any) -> None:
     # last DV I heard from each neighbor: neighbor_id -> {dest_id: cost}
     if not hasattr(server, "dv_from_neighbor"):
         server.dv_from_neighbor: Dict[str, Dict[str, float]] = {}
+    # last time I heard a DV from each neighbor: neighbor_id -> timestamp (seconds)
+    if not hasattr(server, "dv_last_heard_time"):
+        server.dv_last_heard_time: Dict[str, float] = {}
     # flags/handle for my periodic sender thread
     if not hasattr(server, "sultan_periodic_running"):
         server.sultan_periodic_running = False
@@ -135,6 +138,43 @@ def _send_updates_to_neighbors(server: Any) -> None:
             # I don’t want a flaky send to crash the process
             pass
 
+## by Bryson
+def _check_neighbor_timeouts(server: Any) -> None:
+    """
+    Implements the spec rule: if I do not receive a DV update from a neighbor
+    for three consecutive routing intervals, I treat that neighbor as gone by
+    setting the link cost to infinity (but keeping it in the table) and then
+    recomputing routes.
+    """
+    _ensure_state(server)
+    interval = getattr(server, "routing_update_interval", 5)
+    if interval <= 0:
+        return
+
+    now = time.time()
+    threshold = 3 * interval
+
+    neighbors = server.get_neighbors()
+    rt = server.get_routing_table()
+
+    updated = False
+
+    for nid, info in neighbors.items():
+        # Only consider neighbors that are currently reachable (finite cost)
+        if info.get("cost", INF) == INF:
+            continue
+        last = server.dv_last_heard_time.get(nid)
+        if last is None:
+            continue  # never heard from this neighbor yet
+        if now - last >= threshold:
+            # Mark the link as down
+            info["cost"] = INF
+            rt.update_entry(nid, INF, None)
+            updated = True
+
+    if updated:
+        recompute_routes(server)
+
 # step: send one immediate routing packet
 def handle_step_command(server: Any) -> str:
     try:
@@ -162,6 +202,11 @@ def start_periodic_updates(server: Any) -> None:
                 except Exception:
                     pass
                 nxt = now + interval
+            # also periodically check for neighbors that have stopped sending DVs
+            try:
+                _check_neighbor_timeouts(server)
+            except Exception:
+                pass
             time.sleep(0.1)  # keep CPU usage low
 
     t = threading.Thread(target=_loop, daemon=True)
@@ -183,5 +228,7 @@ def ingest_neighbor_vector(server: Any, neighbor_id: str, vector: Dict[str, floa
     _ensure_state(server)
     # store a copy so the caller can reuse its dict safely
     server.dv_from_neighbor[neighbor_id] = dict(vector)
+    # remember when we last heard from this neighbor (for 3-interval timeout)
+    server.dv_last_heard_time[neighbor_id] = time.time()
     recompute_routes(server)
 
