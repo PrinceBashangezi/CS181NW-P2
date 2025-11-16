@@ -1,91 +1,187 @@
-from typing import Any
+# sultan.py — Project 2 (Distance Vector)
+#
+# what I implemented:
+# - handle_update_command: updates a direct link cost on this router, then recomputes the full table
+# - handle_step_command: sends one DV update right now
+# - start_periodic_updates / stop_periodic_updates: background sender that pushes DV every interval
+# - ingest_neighbor_vector: store a neighbor’s last DV and recompute
+# - recompute_routes: Bellman–Ford over all destinations using my link costs + neighbors’ DVs
+
+import threading, time
+from typing import Dict, Any
 
 INF = float('inf')
 
+# I keep a tiny bit of runtime state on the Server object so I don’t have to modify Prince’s class.
+def _ensure_state(server: Any) -> None:
+    # last DV I heard from each neighbor: neighbor_id -> {dest_id: cost}
+    if not hasattr(server, "dv_from_neighbor"):
+        server.dv_from_neighbor: Dict[str, Dict[str, float]] = {}
+    # flags/handle for my periodic sender thread
+    if not hasattr(server, "sultan_periodic_running"):
+        server.sultan_periodic_running = False
+    if not hasattr(server, "sultan_periodic_thread"):
+        server.sultan_periodic_thread = None
 
+# I accept integer costs and also "inf" to mean the link is disabled/unreachable.
 def parse_cost(cost_str: str) -> float:
-    """
-    Parse the link cost from the update command.
-    Supports 'inf' (any case) to represent infinity.
-    """
-    cost_str = cost_str.strip()
-    if cost_str.lower() == 'inf':
+    s = cost_str.strip().lower()
+    if s == "inf":
         return INF
-    return float(int(cost_str))  # ensure integer input, store as float
+    return float(int(cost_str))  # the handout uses ints; I store as float (no harm)
 
+# recompute the whole routing table via Bellman–Ford
+def recompute_routes(server: Any) -> None:
+    _ensure_state(server)
+    rt = server.get_routing_table()
 
-def handle_update_command(server: Any,
-                          server_id1: str,
-                          server_id2: str,
-                          cost_str: str) -> str:
-    """
-    Implements: update <server-ID1> <server-ID2> <Link Cost>
+    # the set of destinations I consider: me, all known servers, and any dests neighbors mentioned
+    all_dests = {server.server_id, *server.get_servers().keys()}
+    for vec in server.dv_from_neighbor.values():
+        all_dests |= set(vec.keys())
 
-    This should be called when the user types:
-        update 1 2 8
-        update 1 2 inf
+    for d in all_dests:
+        if d == server.server_id:
+            # distance to self = 0, next hop is me
+            rt.update_entry(d, 0.0, server.server_id)
+            continue
 
-    server:    instance of prince.Server
-    server_id1, server_id2: IDs given in the command
-    cost_str:  new link cost (number or 'inf')
+        best_cost, best_hop = INF, None
 
-    Returns a status string: "<command-string> SUCCESS" or "<command-string> <error>".
-    """
+        # try going through each neighbor n
+        for n, ninfo in server.get_neighbors().items():
+            link = ninfo["cost"]  # cost to reach the neighbor
+            if link == INF:
+                continue          # link is down or disabled
+            n_vec = server.dv_from_neighbor.get(n, {})
+            via = link + n_vec.get(d, INF)  # cost to n + n’s cost to d
+            if via < best_cost:
+                best_cost, best_hop = via, n
 
-    command_string = f"update {server_id1} {server_id2} {cost_str}"
+        # if I still don't have a path, mark unreachable
+        if best_cost == INF:
+            best_hop = None
 
-    # 1) parse cost
+        rt.update_entry(d, best_cost, best_hop)
+
+# update <server-ID1> <server-ID2> <cost|inf>
+def handle_update_command(server: Any, server_id1: str, server_id2: str, cost_str: str) -> str:
+    _ensure_state(server)
+    cmd = f"update {server_id1} {server_id2} {cost_str}"
+
+    # parse the new cost
     try:
         new_cost = parse_cost(cost_str)
-    except ValueError:
-        return f"{command_string} INVALID COST"
+    except Exception:
+        return f"{cmd} INVALID COST"
 
-    local_id = server.server_id
+    # if I'm not one of the endpoints, I just acknowledge (TA runs this on endpoints separately)
+    me = server.server_id
+    if me != server_id1 and me != server_id2:
+        return f"{cmd} SUCCESS"
 
-    # 2) if this server is not one of the endpoints, nothing to change locally
-    if local_id != server_id1 and local_id != server_id2:
-        # spec says the command will be issued to both endpoints separately,
-        # so on "other" servers we can just acknowledge success
-        return f"{command_string} SUCCESS"
-
-    # 3) figure out which neighbor we are talking about
-    neighbor_id = server_id2 if local_id == server_id1 else server_id1
-
-    # get existing structures
-    neighbors = server.neighbors              # dict: {neighbor_id: {'ip','port','cost'}}
-    routing_table = server.get_routing_table()  # prince.RoutingTable instance
-    all_servers = server.get_servers()        # dict of all known servers
-
-    # 4) make sure neighbor exists in global server list
+    # figure out which neighbor I'm updating
+    neighbor_id = server_id2 if me == server_id1 else server_id1
+    all_servers = server.get_servers()
     if neighbor_id not in all_servers:
-        return f"{command_string} UNKNOWN SERVER"
+        return f"{cmd} UNKNOWN SERVER"
 
-    # 5) update neighbors[] (link cost)
+    # update (or create) the neighbor entry’s direct cost
+    neighbors = server.get_neighbors()
     if neighbor_id not in neighbors:
-        # if it's a brand new neighbor (e.g., link created dynamically), add it
-        neighbor_info = all_servers[neighbor_id]
-        neighbors[neighbor_id] = {
-            'ip':   neighbor_info['ip'],
-            'port': neighbor_info['port'],
-            'cost': new_cost,
-        }
+        info = all_servers[neighbor_id]
+        neighbors[neighbor_id] = {"ip": info["ip"], "port": info["port"], "cost": new_cost}
     else:
-        neighbors[neighbor_id]['cost'] = new_cost
+        neighbors[neighbor_id]["cost"] = new_cost
 
-    # 6) update routing table entry for that neighbor
+    # keep the direct entry in the routing table consistent with the new cost
+    rt = server.get_routing_table()
     if new_cost == INF:
-        # disabling / breaking the link
-        routing_table.update_entry(destination_id=neighbor_id,
-                                   cost=INF,
-                                   next_hop=None)
+        rt.update_entry(neighbor_id, INF, None)
     else:
-        # direct neighbor link with finite cost; next hop is the neighbor itself
-        routing_table.update_entry(destination_id=neighbor_id,
-                                   cost=new_cost,
-                                   next_hop=neighbor_id)
+        rt.update_entry(neighbor_id, new_cost, neighbor_id)
 
-    # NOTE: Full Bellman-Ford recomputation can be triggered here later if you
-    # also have stored distance vectors from neighbors. For Week 1, just
-    # updating the direct link and routing table entry is enough.
+    # after a link change, I recompute everything
+    recompute_routes(server)
+    return f"{cmd} SUCCESS"
 
-    return f"{command_string} SUCCESS"
+# build my current DV as a dict {dest_id: cost}
+def _current_distance_vector(server: Any) -> Dict[str, float]:
+    rt = server.get_routing_table()
+    vec = {server.server_id: 0.0}
+    for sid in server.get_servers().keys():
+        vec[sid] = rt.get_cost(sid)
+    return vec
+
+# send my DV to all neighbors with finite link cost (simple text framing to keep it easy)
+def _send_updates_to_neighbors(server: Any) -> None:
+    sock = server.get_socket()
+    if sock is None:
+        raise RuntimeError("Server socket not started")
+
+    vec = _current_distance_vector(server)
+    lines = [f"DV {server.server_id} {len(vec)}",
+             f"{server.server_ip} {server.server_port}"]
+    for dest, cost in vec.items():
+        lines.append(f"{dest} {'inf' if cost == INF else int(cost)}")
+    data = ("\n".join(lines)).encode("utf-8")
+
+    for nid, info in server.get_neighbors().items():
+        if info["cost"] == INF:
+            continue
+        try:
+            sock.sendto(data, (info["ip"], info["port"]))
+        except Exception:
+            # I don’t want a flaky send to crash the process
+            pass
+
+# step: send one immediate routing packet
+def handle_step_command(server: Any) -> str:
+    try:
+        _send_updates_to_neighbors(server)
+        return "step SUCCESS"
+    except Exception as e:
+        return f"step ERROR {e}"
+
+# periodic sender: fires every server.routing_update_interval seconds
+def start_periodic_updates(server: Any) -> None:
+    _ensure_state(server)
+    if server.sultan_periodic_running:
+        return
+    interval = getattr(server, "routing_update_interval", 5)
+    server.sultan_periodic_running = True
+
+    def _loop():
+        # send once right away, then every interval
+        nxt = 0.0
+        while server.sultan_periodic_running:
+            now = time.time()
+            if now >= nxt:
+                try:
+                    _send_updates_to_neighbors(server)
+                except Exception:
+                    pass
+                nxt = now + interval
+            time.sleep(0.1)  # keep CPU usage low
+
+    t = threading.Thread(target=_loop, daemon=True)
+    server.sultan_periodic_thread = t
+    t.start()
+
+def stop_periodic_updates(server: Any) -> None:
+    _ensure_state(server)
+    server.sultan_periodic_running = False
+    t = server.sultan_periodic_thread
+    if t and t.is_alive():
+        try:
+            t.join(timeout=0.5)
+        except Exception:
+            pass
+
+# called by my UDP receiver whenever I parse a DV from a neighbor
+def ingest_neighbor_vector(server: Any, neighbor_id: str, vector: Dict[str, float]) -> None:
+    _ensure_state(server)
+    # store a copy so the caller can reuse its dict safely
+    server.dv_from_neighbor[neighbor_id] = dict(vector)
+    recompute_routes(server)
+
