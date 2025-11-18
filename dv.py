@@ -5,18 +5,6 @@ This file ties together:
 - prince.py:  Server, topology parsing, display, disable
 - sultan.py:  Distance Vector logic (update, step, periodic sender, ingest DV)
 - bryson.py:  Packet counting/logging and crash command
-
-The TA should run this script and interact with it via the commands
-described in the project handout, e.g.:
-
-  server -t <topology-file> -i <routing-update-interval>
-  display
-  update <server-ID1> <server-ID2> <cost|inf>
-  step
-  packets [on|off]
-  disable <server-ID>
-  crash
-  quit / exit
 """
 
 import socket

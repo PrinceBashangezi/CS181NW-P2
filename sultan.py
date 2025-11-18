@@ -8,12 +8,13 @@
 # - recompute_routes: Bellman–Ford over all destinations using my link costs + neighbors’ DVs
 
 import threading, time
-from typing import Dict, Any
+from typing import Dict
+from prince import Server
 
 INF = float('inf')
 
 # I keep a tiny bit of runtime state on the Server object so I don’t have to modify Prince’s class.
-def _ensure_state(server: Any) -> None:
+def _ensure_state(server: Server) -> None:
     # last DV I heard from each neighbor: neighbor_id -> {dest_id: cost}
     if not hasattr(server, "dv_from_neighbor"):
         server.dv_from_neighbor: Dict[str, Dict[str, float]] = {}
@@ -34,7 +35,7 @@ def parse_cost(cost_str: str) -> float:
     return float(int(cost_str))  # the handout uses ints; I store as float (no harm)
 
 # recompute the whole routing table via Bellman–Ford
-def recompute_routes(server: Any) -> None:
+def recompute_routes(server: Server) -> None:
     _ensure_state(server)
     rt = server.get_routing_table()
 
@@ -51,13 +52,20 @@ def recompute_routes(server: Any) -> None:
 
         best_cost, best_hop = INF, None
 
+        # first, check if d is a direct neighbor with a finite link cost
+        neighbors = server.get_neighbors()
+        if d in neighbors:
+            direct_link = neighbors[d]["cost"]
+            if direct_link != INF:
+                best_cost, best_hop = direct_link, d
+
         # try going through each neighbor n
-        for n, ninfo in server.get_neighbors().items():
+        for n, ninfo in neighbors.items():
             link = ninfo["cost"]  # cost to reach the neighbor
             if link == INF:
                 continue          # link is down or disabled
             n_vec = server.dv_from_neighbor.get(n, {})
-            via = link + n_vec.get(d, INF)  # cost to n + n’s cost to d
+            via = link + n_vec.get(d, INF)  # cost to n + n's cost to d
             if via < best_cost:
                 best_cost, best_hop = via, n
 
@@ -68,7 +76,7 @@ def recompute_routes(server: Any) -> None:
         rt.update_entry(d, best_cost, best_hop)
 
 # update <server-ID1> <server-ID2> <cost|inf>
-def handle_update_command(server: Any, server_id1: str, server_id2: str, cost_str: str) -> str:
+def handle_update_command(server: Server, server_id1: str, server_id2: str, cost_str: str) -> str:
     _ensure_state(server)
     cmd = f"update {server_id1} {server_id2} {cost_str}"
 
@@ -78,7 +86,7 @@ def handle_update_command(server: Any, server_id1: str, server_id2: str, cost_st
     except Exception:
         return f"{cmd} INVALID COST"
 
-    # if I'm not one of the endpoints, I just acknowledge (TA runs this on endpoints separately)
+    # if I'm not one of the endpoints, I just acknowledge
     me = server.server_id
     if me != server_id1 and me != server_id2:
         return f"{cmd} SUCCESS"
@@ -109,7 +117,7 @@ def handle_update_command(server: Any, server_id1: str, server_id2: str, cost_st
     return f"{cmd} SUCCESS"
 
 # build my current DV as a dict {dest_id: cost}
-def _current_distance_vector(server: Any) -> Dict[str, float]:
+def _current_distance_vector(server: Server) -> Dict[str, float]:
     rt = server.get_routing_table()
     vec = {server.server_id: 0.0}
     for sid in server.get_servers().keys():
@@ -117,7 +125,7 @@ def _current_distance_vector(server: Any) -> Dict[str, float]:
     return vec
 
 # send my DV to all neighbors with finite link cost (simple text framing to keep it easy)
-def _send_updates_to_neighbors(server: Any) -> None:
+def _send_updates_to_neighbors(server: Server) -> None:
     sock = server.get_socket()
     if sock is None:
         raise RuntimeError("Server socket not started")
@@ -139,7 +147,7 @@ def _send_updates_to_neighbors(server: Any) -> None:
             pass
 
 ## by Bryson
-def _check_neighbor_timeouts(server: Any) -> None:
+def _check_neighbor_timeouts(server: Server) -> None:
     """
     Implements the spec rule: if I do not receive a DV update from a neighbor
     for three consecutive routing intervals, I treat that neighbor as gone by
@@ -176,7 +184,7 @@ def _check_neighbor_timeouts(server: Any) -> None:
         recompute_routes(server)
 
 # step: send one immediate routing packet
-def handle_step_command(server: Any) -> str:
+def handle_step_command(server: Server) -> str:
     try:
         _send_updates_to_neighbors(server)
         return "step SUCCESS"
@@ -184,7 +192,7 @@ def handle_step_command(server: Any) -> str:
         return f"step ERROR {e}"
 
 # periodic sender: fires every server.routing_update_interval seconds
-def start_periodic_updates(server: Any) -> None:
+def start_periodic_updates(server: Server) -> None:
     _ensure_state(server)
     if server.sultan_periodic_running:
         return
@@ -213,7 +221,7 @@ def start_periodic_updates(server: Any) -> None:
     server.sultan_periodic_thread = t
     t.start()
 
-def stop_periodic_updates(server: Any) -> None:
+def stop_periodic_updates(server: Server) -> None:
     _ensure_state(server)
     server.sultan_periodic_running = False
     t = server.sultan_periodic_thread
@@ -224,7 +232,7 @@ def stop_periodic_updates(server: Any) -> None:
             pass
 
 # called by my UDP receiver whenever I parse a DV from a neighbor
-def ingest_neighbor_vector(server: Any, neighbor_id: str, vector: Dict[str, float]) -> None:
+def ingest_neighbor_vector(server: Server, neighbor_id: str, vector: Dict[str, float]) -> None:
     _ensure_state(server)
     # store a copy so the caller can reuse its dict safely
     server.dv_from_neighbor[neighbor_id] = dict(vector)
