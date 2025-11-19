@@ -8,7 +8,7 @@
 # - recompute_routes: Bellman–Ford over all destinations using my link costs + neighbors’ DVs
 
 import threading, time
-from typing import Dict
+from typing import Dict, Optional
 from prince import Server
 
 INF = float('inf')
@@ -65,7 +65,11 @@ def recompute_routes(server: Server) -> None:
             if link == INF:
                 continue          # link is down or disabled
             n_vec = server.dv_from_neighbor.get(n, {})
-            via = link + n_vec.get(d, INF)  # cost to n + n's cost to d
+            n_cost_to_d = n_vec.get(d, INF)  # neighbor's cost to destination
+            # If neighbor can't reach the destination (INF), don't use this path
+            if n_cost_to_d == INF:
+                continue
+            via = link + n_cost_to_d  # cost to n + n's cost to d
             if via < best_cost:
                 best_cost, best_hop = via, n
 
@@ -113,15 +117,27 @@ def handle_update_command(server: Server, server_id1: str, server_id2: str, cost
         rt.update_entry(neighbor_id, new_cost, neighbor_id)
 
     # after a link change, I recompute everything
+    # Note: We do NOT clear the neighbor's distance vector here (only on timeout).
+    # This allows finding alternative paths when disabling a direct link (e.g., A-B disabled
+    # but A can still reach B via C). The recompute_routes function will find the best path.
     recompute_routes(server)
     return f"{cmd} SUCCESS"
 
 # build my current DV as a dict {dest_id: cost}
-def _current_distance_vector(server: Server) -> Dict[str, float]:
+# If neighbor_id is provided, implements split horizon with poison reverse:
+# if our next hop to a destination is the neighbor, we advertise INF (poison reverse)
+def _current_distance_vector(server: Server, neighbor_id: Optional[str] = None) -> Dict[str, float]:
     rt = server.get_routing_table()
     vec = {server.server_id: 0.0}
     for sid in server.get_servers().keys():
-        vec[sid] = rt.get_cost(sid)
+        cost = rt.get_cost(sid)
+        # Split horizon with poison reverse: if sending to neighbor that is our next hop,
+        # advertise INF to prevent count-to-infinity
+        if neighbor_id is not None:
+            next_hop = rt.get_next_hop(sid)
+            if next_hop == neighbor_id:
+                cost = INF  # Poison reverse
+        vec[sid] = cost
     return vec
 
 # send my DV to all neighbors with finite link cost (simple text framing to keep it easy)
@@ -130,20 +146,21 @@ def _send_updates_to_neighbors(server: Server) -> None:
     if sock is None:
         raise RuntimeError("Server socket not started")
 
-    vec = _current_distance_vector(server)
-    lines = [f"DV {server.server_id} {len(vec)}",
-             f"{server.server_ip} {server.server_port}"]
-    for dest, cost in vec.items():
-        lines.append(f"{dest} {'inf' if cost == INF else int(cost)}")
-    data = ("\n".join(lines)).encode("utf-8")
-
     for nid, info in server.get_neighbors().items():
         if info["cost"] == INF:
             continue
+        # Build distance vector with poison reverse for this specific neighbor
+        vec = _current_distance_vector(server, neighbor_id=nid)
+        lines = [f"DV {server.server_id} {len(vec)}",
+                 f"{server.server_ip} {server.server_port}"]
+        for dest, cost in vec.items():
+            lines.append(f"{dest} {'inf' if cost == INF else int(cost)}")
+        data = ("\n".join(lines)).encode("utf-8")
+        
         try:
             sock.sendto(data, (info["ip"], info["port"]))
         except Exception:
-            # I don’t want a flaky send to crash the process
+            # I don't want a flaky send to crash the process
             pass
 
 ## by Bryson
@@ -178,6 +195,20 @@ def _check_neighbor_timeouts(server: Server) -> None:
             # Mark the link as down
             info["cost"] = INF
             rt.update_entry(nid, INF, None)
+            # Clear the neighbor's distance vector to avoid using stale information
+            if nid in server.dv_from_neighbor:
+                del server.dv_from_neighbor[nid]
+            
+            # Critical fix: Invalidate all routes that were using this neighbor as next hop
+            # This prevents count-to-infinity when other neighbors have stale information
+            table = rt.get_table()
+            for dest_id, entry in table.items():
+                if dest_id == server.server_id:
+                    continue  # Skip self
+                if entry.get('next_hop') == nid:
+                    # This route was using the timed-out neighbor, mark as unreachable
+                    rt.update_entry(dest_id, INF, None)
+            
             updated = True
 
     if updated:
