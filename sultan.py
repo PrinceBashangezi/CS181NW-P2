@@ -194,7 +194,7 @@ def _current_distance_vector(server: Server, neighbor_id: Optional[str] = None) 
         vec[sid] = cost
     return vec
 
-# send my DV to all neighbors with finite link cost (simple text framing to keep it easy)
+# send my DV to all neighbors with finite link cost (General Message format)
 def _send_updates_to_neighbors(server: Server) -> None:
     sock = server.get_socket()
     if sock is None:
@@ -203,12 +203,47 @@ def _send_updates_to_neighbors(server: Server) -> None:
     for nid, info in server.get_neighbors().items():
         if info["cost"] == INF:
             continue
-        # Build distance vector with poison reverse for this specific neighbor
         vec = _current_distance_vector(server, neighbor_id=nid)
-        lines = [f"DV {server.server_id} {len(vec)}",
-                 f"{server.server_ip} {server.server_port}"]
-        for dest, cost in vec.items():
-            lines.append(f"{dest} {'inf' if cost == INF else int(cost)}")
+        
+        # Build message in General Message format:
+        # Number of update fields
+        # Server port
+        # Server IP
+        # For each entry:
+        #   Server IP address
+        #   Server port
+        #   0x0
+        #   Server ID
+        #   Cost
+        all_servers = server.get_servers()
+        lines = []  # Will build message first, then prepend count
+        lines.append(str(server.server_port))  # Server port
+        lines.append(server.server_ip)  # Server IP
+        
+        entry_count = 0
+        for dest_id, cost in vec.items():
+            # Get server info for this destination
+            if dest_id == server.server_id:
+                # For self, use our own IP and port
+                dest_ip = server.server_ip
+                dest_port = server.server_port
+            elif dest_id in all_servers:
+                dest_ip = all_servers[dest_id]["ip"]
+                dest_port = all_servers[dest_id]["port"]
+            else:
+                # Unknown server, skip it
+                continue
+            
+            lines.append(dest_ip)  # Server IP address
+            lines.append(str(dest_port))  # Server port
+            lines.append("0x0")  # 0x0 marker
+            lines.append(dest_id)  # Server ID
+            lines.append("inf" if cost == INF else str(int(cost)))  # Cost
+            entry_count += 1
+        
+        # Prepend the number of update fields
+        lines.insert(0, str(entry_count))
+        
         data = ("\n".join(lines)).encode("utf-8")
         
         try:

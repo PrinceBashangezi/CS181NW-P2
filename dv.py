@@ -133,14 +133,20 @@ def _parse_link_update_message(data: bytes):
 
 def _parse_dv_message(data: bytes) -> Optional[Dict[str, float]]:
     """
-    Parse a DV message in the simple text framing used by sultan._send_updates_to_neighbors:
-        line0: "DV <neighbor_id> <N>"
-        line1: "<ip> <port>"
-        next N lines: "<dest_id> <cost|inf>"
+    Parse a DV message in the General Message format:
+        line0: Number of update fields
+        line1: Server port (sender's port)
+        line2: Server IP (sender's IP)
+        For each entry (5 lines per entry):
+            Server IP address
+            Server port
+            0x0
+            Server ID
+            Cost
 
     Returns:
       dict with keys:
-        'neighbor_id': str
+        'neighbor_id': str (derived from sender's IP/port)
         'vector': Dict[str, float]
     or None if malformed.
     """
@@ -153,37 +159,57 @@ def _parse_dv_message(data: bytes) -> Optional[Dict[str, float]]:
         return None
 
     lines = text.splitlines()
-    if len(lines) < 2:
+    if len(lines) < 3:
         return None
 
-    header = lines[0].split()
-    if len(header) != 3 or header[0] != "DV":
-        return None
-
-    neighbor_id = header[1]
+    # Parse header
     try:
-        n_entries = int(header[2])
+        n_entries = int(lines[0])  # Number of update fields
     except ValueError:
         return None
 
-    # We expect at least: header + addr-line + n_entries
-    if len(lines) < 2 + n_entries:
+    sender_port = lines[1]  # Server port
+    sender_ip = lines[2]  # Server IP
+
+    # Each entry is 5 lines: IP, port, 0x0, ID, cost
+    # We need: header (3 lines) + n_entries * 5 lines
+    if len(lines) < 3 + n_entries * 5:
         return None
 
     vec: Dict[str, float] = {}
-    # lines[1] is "<ip> <port>" which we currently don't use
-    for line in lines[2 : 2 + n_entries]:
-        parts = line.split()
-        if len(parts) != 2:
+    idx = 3  # Start after header
+    
+    for i in range(n_entries):
+        if idx + 4 >= len(lines):
             return None
-        dest_id, cost_str = parts
+        
+        # Parse entry: IP, port, 0x0, ID, cost
+        entry_ip = lines[idx]
+        entry_port = lines[idx + 1]
+        marker = lines[idx + 2]
+        dest_id = lines[idx + 3]
+        cost_str = lines[idx + 4]
+        
+        # Validate 0x0 marker
+        if marker != "0x0":
+            return None
+        
         try:
             cost = parse_cost(cost_str)
         except Exception:
             return None
+        
         vec[dest_id] = cost
+        idx += 5
 
-    return {"neighbor_id": neighbor_id, "vector": vec}
+    # Try to identify neighbor by matching sender IP/port with known servers
+    # We'll need to match this in the caller, but for now we can use the sender info
+    # The caller will need to identify the neighbor_id from sender_ip and sender_port
+    return {
+        "sender_ip": sender_ip,
+        "sender_port": sender_port,
+        "vector": vec
+    }
 
 
 def _dv_receiver_loop(server: Server) -> None:
@@ -241,8 +267,21 @@ def _dv_receiver_loop(server: Server) -> None:
         if not parsed:
             continue
 
-        neighbor_id = parsed["neighbor_id"]
+        sender_ip = parsed["sender_ip"]
+        sender_port = parsed["sender_port"]
         vector = parsed["vector"]
+
+        # Identify neighbor by matching sender IP and port with known servers
+        neighbor_id = None
+        all_servers = server.get_servers()
+        for sid, sinfo in all_servers.items():
+            if sinfo["ip"] == sender_ip and str(sinfo["port"]) == sender_port:
+                neighbor_id = sid
+                break
+        
+        # If we can't identify the neighbor, skip this message
+        if neighbor_id is None:
+            continue
 
         # Required by spec: print when we successfully receive a routing update
         print(f"RECEIVED A MESSAGE FROM SERVER {neighbor_id}")
