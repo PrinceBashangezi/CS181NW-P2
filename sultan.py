@@ -79,6 +79,57 @@ def recompute_routes(server: Server) -> None:
 
         rt.update_entry(d, best_cost, best_hop)
 
+# Send a link update notification to the other endpoint to ensure bidirectional symmetry
+def _notify_link_update(server: Server, other_server_id: str, cost: float) -> None:
+    """Send a link cost update message to the other endpoint to maintain A-B = B-A symmetry"""
+    sock = server.get_socket()
+    if sock is None:
+        return
+    
+    all_servers = server.get_servers()
+    if other_server_id not in all_servers:
+        return
+    
+    other_info = all_servers[other_server_id]
+    cost_str = "inf" if cost == INF else str(int(cost))
+    
+    # Send a LINK_UPDATE message: "LINK_UPDATE <from_id> <to_id> <cost>"
+    message = f"LINK_UPDATE {server.server_id} {other_server_id} {cost_str}"
+    
+    try:
+        sock.sendto(message.encode("utf-8"), (other_info["ip"], other_info["port"]))
+    except Exception:
+        # Silently fail - network issues shouldn't crash the update
+        pass
+
+# Handle incoming link update notification from another server
+def handle_link_update_notification(server: Server, from_server_id: str, cost: float) -> None:
+    """Process a link update notification from another server to maintain bidirectional symmetry"""
+    _ensure_state(server)
+    
+    # Validate the sender is a known server
+    all_servers = server.get_servers()
+    if from_server_id not in all_servers:
+        return
+    
+    # Update (or create) the neighbor entry's direct cost
+    neighbors = server.get_neighbors()
+    if from_server_id not in neighbors:
+        info = all_servers[from_server_id]
+        neighbors[from_server_id] = {"ip": info["ip"], "port": info["port"], "cost": cost}
+    else:
+        neighbors[from_server_id]["cost"] = cost
+    
+    # Keep the direct entry in the routing table consistent with the new cost
+    rt = server.get_routing_table()
+    if cost == INF:
+        rt.update_entry(from_server_id, INF, None)
+    else:
+        rt.update_entry(from_server_id, cost, from_server_id)
+    
+    # Recompute routes after link change
+    recompute_routes(server)
+
 # update <server-ID1> <server-ID2> <cost|inf>
 def handle_update_command(server: Server, server_id1: str, server_id2: str, cost_str: str) -> str:
     _ensure_state(server)
@@ -101,7 +152,7 @@ def handle_update_command(server: Server, server_id1: str, server_id2: str, cost
     if neighbor_id not in all_servers:
         return f"{cmd} UNKNOWN SERVER"
 
-    # update (or create) the neighbor entry’s direct cost
+    # update (or create) the neighbor entry's direct cost
     neighbors = server.get_neighbors()
     if neighbor_id not in neighbors:
         info = all_servers[neighbor_id]
@@ -115,6 +166,9 @@ def handle_update_command(server: Server, server_id1: str, server_id2: str, cost
         rt.update_entry(neighbor_id, INF, None)
     else:
         rt.update_entry(neighbor_id, new_cost, neighbor_id)
+
+    # Notify the other endpoint to update its view (ensures A-B = B-A)
+    _notify_link_update(server, neighbor_id, new_cost)
 
     # after a link change, I recompute everything
     # Note: We do NOT clear the neighbor's distance vector here (only on timeout).

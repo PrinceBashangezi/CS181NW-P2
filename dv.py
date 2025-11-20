@@ -20,6 +20,7 @@ from sultan import (
     start_periodic_updates,
     stop_periodic_updates,
     ingest_neighbor_vector,
+    handle_link_update_notification,
 )
 from bryson import PacketManager, handle_packets_command, handle_crash_command
 
@@ -100,6 +101,35 @@ def parse_packets_command_args(command_line: str):
 ###############################################################################
 # Distance Vector packet (DV) receiver thread
 ###############################################################################
+
+def _parse_link_update_message(data: bytes):
+    """
+    Parse a LINK_UPDATE message: "LINK_UPDATE <from_id> <to_id> <cost|inf>"
+    Returns dict with 'from_id', 'to_id', 'cost' or None if malformed.
+    """
+    try:
+        text = data.decode("utf-8").strip()
+    except Exception:
+        return None
+    
+    if not text:
+        return None
+    
+    parts = text.split()
+    if len(parts) != 4 or parts[0] != "LINK_UPDATE":
+        return None
+    
+    from_id = parts[1]
+    to_id = parts[2]
+    cost_str = parts[3]
+    
+    try:
+        cost = parse_cost(cost_str)
+    except Exception:
+        return None
+    
+    return {"from_id": from_id, "to_id": to_id, "cost": cost}
+
 
 def _parse_dv_message(data: bytes) -> Optional[Dict[str, float]]:
     """
@@ -189,6 +219,24 @@ def _dv_receiver_loop(server: Server) -> None:
             # Unexpected receive error; do not crash the thread
             continue
 
+        # Try parsing as link update message first
+        link_update = _parse_link_update_message(data)
+        if link_update:
+            # This is a link update notification to maintain A-B = B-A symmetry
+            from_id = link_update["from_id"]
+            to_id = link_update["to_id"]
+            cost = link_update["cost"]
+            
+            # Only process if this message is for us (to_id matches our server_id)
+            if to_id == server.server_id:
+                try:
+                    handle_link_update_notification(server, from_id, cost)
+                except Exception:
+                    # Ignore processing errors to keep receiver alive
+                    pass
+            continue
+        
+        # Try parsing as DV message
         parsed = _parse_dv_message(data)
         if not parsed:
             continue
